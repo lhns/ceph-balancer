@@ -2317,7 +2317,7 @@ class ClusterState:
 
         # cf. PGMap::get_rule_avail
         # {rootname -> relative_root_selection_weight}
-        rootweights = rootweights_from_rule(pool_crushrule, pool_size)
+        rootweights = rootweights_from_rule(pool_crushrule, pool_size, self.state["osd_df_tree_dump"]["nodes"])
         root_weight_sum = sum(rootweights.values())
         osd_weights = defaultdict(lambda: 0.0)
 
@@ -2476,7 +2476,7 @@ class ClusterState:
 
 
 
-def root_uses_from_rule(rule, pool_size):
+def root_uses_from_rule(rule, pool_size, nodes):
     """
     rule: crush rule id
     pool_size: number of osds in one pg
@@ -2492,12 +2492,27 @@ def root_uses_from_rule(rule, pool_size):
     root_name = None
     root_choice_count = None
 
+    def find_root(node):
+        if node['type'] == "root":
+            return node
+        else:
+            for parent in [n for n in nodes if node['id'] in n['children']]:
+                root = find_root(parent)
+                if root:
+                    return root
+        return None
+
+    def find_root_by_name(node_name):
+        for node in [n for n in nodes if n['name'] == node_name]:
+            return find_root(node)
+
     for step in rule["steps"]:
         if step["op"] == "take":
             # new root take
-            root_name = step["item_name"]
-            root_choice_count = 1
-            num = 1
+            root_name = find_root_by_name(step["item_name"])['name']
+            if root_name:
+                root_choice_count = 1
+                num = 1
 
         elif step["op"].startswith("choose"):
             num = step["num"]
@@ -2529,7 +2544,7 @@ def root_uses_from_rule(rule, pool_size):
     return root_usages, root_order
 
 
-def rootweights_from_rule(rule, pool_size):
+def rootweights_from_rule(rule, pool_size, nodes):
     """
     given a crush rule and a pool size (involved osds in a pg),
     calculate the weights crush-roots are chosen for each pg.
@@ -2537,7 +2552,7 @@ def rootweights_from_rule(rule, pool_size):
     returns {root_name -> relative_choice_weight_to_all_root_choices}
     """
     # root_name -> choice_count
-    root_usages, _ = root_uses_from_rule(rule, pool_size)
+    root_usages, _ = root_uses_from_rule(rule, pool_size, nodes)
 
     # normalize the weights:
     weight_sum = sum(root_usages.values())
@@ -2616,7 +2631,7 @@ class PGMoveChecker:
         logging.debug(strlazy(lambda: (f"movecheck for pg {move_pgid} on {self.pg_osds} (poolsize={self.pool_size})")))
 
         # crush root names and usages for this pg
-        root_uses, root_order = root_uses_from_rule(self.rule, self.pool_size)
+        root_uses, root_order = root_uses_from_rule(self.rule, self.pool_size, self.cluster.state["osd_df_tree_dump"]["nodes"])
 
         if len(root_order) != len(self.pg_osds):
             raise RuntimeError(f"not as many roots as shards! root_order={root_order} osds={self.pg_osds}")
@@ -3188,7 +3203,7 @@ class PGMappings:
                 pool = cluster.pools[poolid]
                 pool_size = pool['size']
                 pool_crushrule = cluster.crushrules[pool['crush_rule']]
-                for root_name in root_uses_from_rule(pool_crushrule, pool_size)[0].keys():
+                for root_name in root_uses_from_rule(pool_crushrule, pool_size, self.cluster.state["osd_df_tree_dump"]["nodes"])[0].keys():
                     for osdid in cluster.candidates_for_root(root_name).keys():
                         self._enabled_crushclasses.add(cluster.osd_crushclass[osdid])
 
@@ -3201,7 +3216,7 @@ class PGMappings:
 
             # figure out which pools are affected by these crushclasses
             for poolid, poolprops in cluster.pools.items():
-                rootweights = rootweights_from_rule(cluster.crushrules[poolprops['crush_rule']], poolprops["size"])
+                rootweights = rootweights_from_rule(cluster.crushrules[poolprops['crush_rule']], poolprops["size"], self.cluster.state["osd_df_tree_dump"]["nodes"])
 
                 # crush root names used in that pool
                 for crushroot in rootweights.keys():
@@ -5053,7 +5068,7 @@ def show(args, cluster):
             crushruleid = poolprops['crush_rule']
             crushrule = cluster.crushrules[crushruleid]
             crushrulename = crushrule['name']
-            rootweights = rootweights_from_rule(crushrule, poolprops["size"])
+            rootweights = rootweights_from_rule(crushrule, poolprops["size"], cluster.state["osd_df_tree_dump"]["nodes"])
 
             rootweights_ppl = list()
             for crushroot, weight in rootweights.items():
